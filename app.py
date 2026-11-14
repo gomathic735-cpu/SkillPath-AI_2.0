@@ -3,18 +3,27 @@ import sqlite3
 import pandas as pd
 import plotly.express as px
 import re
+import io
+
 from datetime import datetime
 from pypdf import PdfReader
 from docx import Document
-import io
+from agentic_planner import run_agentic_workflow
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle
+)
 
 # =====================================================
-# PAGE CONFIG
+# PAGE CONFIGURATION
 # =====================================================
 
 st.set_page_config(
@@ -31,7 +40,10 @@ DB_NAME = "skillpath.db"
 # =====================================================
 
 def get_connection():
-    return sqlite3.connect(DB_NAME, check_same_thread=False)
+    return sqlite3.connect(
+        DB_NAME,
+        check_same_thread=False
+    )
 
 
 def initialize_database():
@@ -90,7 +102,6 @@ def initialize_database():
             VALUES (?, ?, ?, ?)
         """, skill)
 
-        # Get actual assessment score
         cur.execute("""
             SELECT MAX(score)
             FROM assessment_sessions
@@ -101,7 +112,6 @@ def initialize_database():
 
         if actual_score is None:
 
-            # No assessment completed: remove sample scores
             cur.execute("""
                 UPDATE skill_scores
                 SET claimed=0,
@@ -112,7 +122,6 @@ def initialize_database():
 
         else:
 
-            # Only actual assessment score is considered
             cur.execute("""
                 UPDATE skill_scores
                 SET proven=?
@@ -394,27 +403,25 @@ QUESTION_BANK = {
         ]
     }
 }
-
-
 # =====================================================
-# RESUME SKILL DATABASE
+# SKILL KEYWORDS
 # =====================================================
 
 SKILL_KEYWORDS = {
 
     "Python": [
-        "python", "pandas", "numpy", "django", "flask",
-        "streamlit", "automation"
+        "python", "pandas", "numpy", "django",
+        "flask", "streamlit", "automation"
     ],
 
     "Java": [
-        "java", "spring", "spring boot", "jdbc",
-        "hibernate", "oop"
+        "java", "spring", "spring boot",
+        "jdbc", "hibernate", "oop"
     ],
 
     "SQL": [
-        "sql", "mysql", "postgresql", "sqlite",
-        "database", "joins"
+        "sql", "mysql", "postgresql",
+        "sqlite", "database", "joins"
     ],
 
     "Web Development": [
@@ -423,22 +430,24 @@ SKILL_KEYWORDS = {
     ],
 
     "Data Analysis": [
-        "excel", "power bi", "tableau", "data analysis",
-        "data visualization", "statistics"
+        "excel", "power bi", "tableau",
+        "data analysis", "data visualization", "statistics"
     ],
 
     "Machine Learning": [
-        "machine learning", "deep learning", "tensorflow",
-        "pytorch", "scikit-learn", "artificial intelligence"
+        "machine learning", "deep learning",
+        "tensorflow", "pytorch", "scikit-learn",
+        "artificial intelligence"
     ],
 
     "Cloud": [
-        "aws", "azure", "google cloud", "cloud computing"
+        "aws", "azure", "google cloud",
+        "cloud computing"
     ],
 
     "Communication": [
-        "communication", "presentation", "teamwork",
-        "leadership", "collaboration"
+        "communication", "presentation",
+        "teamwork", "leadership", "collaboration"
     ],
 
     "Version Control": [
@@ -456,7 +465,7 @@ SKILL_KEYWORDS = {
 
 
 # =====================================================
-# JOB ROLE DATABASE
+# JOB ROLE REQUIREMENTS
 # =====================================================
 
 JOB_ROLES = {
@@ -526,6 +535,9 @@ JOB_ROLES = {
 
 def extract_resume_text(uploaded_file):
 
+    if uploaded_file is None:
+        return ""
+
     file_name = uploaded_file.name.lower()
 
     try:
@@ -537,7 +549,10 @@ def extract_resume_text(uploaded_file):
             text_content = ""
 
             for page in reader.pages:
-                text_content += page.extract_text() or ""
+                page_text = page.extract_text()
+
+                if page_text:
+                    text_content += page_text + "\n"
 
             return text_content
 
@@ -545,29 +560,29 @@ def extract_resume_text(uploaded_file):
 
             document = Document(uploaded_file)
 
-            text_content = "\n".join(
-                paragraph.text
-                for paragraph in document.paragraphs
-            )
+            text_content = ""
+
+            for paragraph in document.paragraphs:
+                text_content += paragraph.text + "\n"
 
             return text_content
 
         elif file_name.endswith(".txt"):
 
-            return uploaded_file.getvalue().decode(
+            return uploaded_file.read().decode(
                 "utf-8",
                 errors="ignore"
             )
 
         else:
 
-            return None
+            return ""
 
     except Exception as error:
 
-        st.error(f"Unable to read resume: {error}")
+        st.error(f"Resume reading error: {error}")
 
-        return None
+        return ""
 
 
 # =====================================================
@@ -576,23 +591,27 @@ def extract_resume_text(uploaded_file):
 
 def detect_skills(resume_text):
 
-    detected = []
+    detected_skills = []
 
-    resume_text = resume_text.lower()
+    text = resume_text.lower()
 
-    for category, keywords in SKILL_KEYWORDS.items():
+    for skill, keywords in SKILL_KEYWORDS.items():
+
+        found = False
 
         for keyword in keywords:
 
-            pattern = r"(?<!\w)" + re.escape(keyword.lower()) + r"(?!\w)"
+            pattern = r"\b" + re.escape(keyword.lower()) + r"\b"
 
-            if re.search(pattern, resume_text):
+            if re.search(pattern, text):
 
-                detected.append(category)
-
+                found = True
                 break
 
-    return detected
+        if found:
+            detected_skills.append(skill)
+
+    return detected_skills
 
 
 # =====================================================
@@ -603,57 +622,140 @@ def analyze_resume(resume_text):
 
     detected_skills = detect_skills(resume_text)
 
-    all_skills = list(SKILL_KEYWORDS.keys())
+    word_count = len(resume_text.split())
 
-    missing_skills = [
-        skill for skill in all_skills
-        if skill not in detected_skills
-    ]
+    sections = {
 
-    resume_score = round(
-        len(detected_skills) / len(all_skills) * 100
-    )
+        "Education": [
+            "education",
+            "academic",
+            "degree",
+            "college"
+        ],
+
+        "Experience": [
+            "experience",
+            "internship",
+            "work experience"
+        ],
+
+        "Projects": [
+            "projects",
+            "project"
+        ],
+
+        "Certifications": [
+            "certification",
+            "certifications",
+            "certificate"
+        ],
+
+        "Skills": [
+            "skills",
+            "technical skills"
+        ]
+    }
+
+    section_results = {}
+
+    lower_text = resume_text.lower()
+
+    for section, keywords in sections.items():
+
+        section_results[section] = any(
+            keyword in lower_text
+            for keyword in keywords
+        )
+
+    suggestions = []
+
+    for section, found in section_results.items():
+
+        if not found:
+
+            suggestions.append(
+                f"Consider adding a clear {section} section."
+            )
+
+    if len(detected_skills) < 3:
+
+        suggestions.append(
+            "Add more relevant technical skills to your resume."
+        )
+
+    if word_count < 100:
+
+        suggestions.append(
+            "Your resume content is short. Add more details about your education and projects."
+        )
+
+    if not suggestions:
+
+        suggestions.append(
+            "Your resume contains the main sections. Continue improving project descriptions and measurable achievements."
+        )
 
     return {
-        "detected": detected_skills,
-        "missing": missing_skills,
-        "score": resume_score
+
+        "detected_skills": detected_skills,
+
+        "word_count": word_count,
+
+        "sections": section_results,
+
+        "suggestions": suggestions,
+
+        "skill_count": len(detected_skills)
     }
 
 
 # =====================================================
-# JOB MATCHING
+# JOB ROLE MATCHING
 # =====================================================
 
-def calculate_job_matches(detected_skills):
+def calculate_job_matches(user_skills):
 
     results = []
 
     for role, required_skills in JOB_ROLES.items():
 
-        matched = [
-            skill for skill in required_skills
-            if skill in detected_skills
-        ]
+        matched = []
 
-        missing = [
-            skill for skill in required_skills
-            if skill not in detected_skills
-        ]
+        missing = []
 
-        percentage = round(
-            len(matched) / len(required_skills) * 100
-        )
+        for skill in required_skills:
+
+            if skill in user_skills:
+                matched.append(skill)
+
+            else:
+                missing.append(skill)
+
+        if len(required_skills) > 0:
+
+            percentage = round(
+                len(matched) / len(required_skills) * 100
+            )
+
+        else:
+
+            percentage = 0
 
         results.append({
-            "Job Role": role,
+
+            "Role": role,
+
             "Match": percentage,
-            "Matched Skills": matched,
-            "Missing Skills": missing
+
+            "Matched Skills": ", ".join(matched),
+
+            "Missing Skills": ", ".join(missing),
+
+            "Required Skills": len(required_skills)
         })
 
     results.sort(
-        key=lambda x: x["Match"],
+        key=lambda item: item["Match"],
         reverse=True
     )
 
@@ -661,88 +763,102 @@ def calculate_job_matches(detected_skills):
 
 
 # =====================================================
-# PERSONALIZED RECOMMENDATIONS
+# AI RECOMMENDATIONS
 # =====================================================
 
 def get_recommendations():
 
     conn = get_connection()
 
-    df = pd.read_sql_query("""
-        SELECT skill, level, score
-        FROM assessment_sessions
-        ORDER BY attempted_at DESC
-    """, conn)
+    skills_df = pd.read_sql_query(
+        "SELECT * FROM skill_scores",
+        conn
+    )
 
-    answers = pd.read_sql_query("""
+    history_df = pd.read_sql_query(
+        """
+        SELECT skill, level, score, attempted_at
+        FROM assessment_sessions
+        ORDER BY id DESC
+        """,
+        conn
+    )
+
+    answers_df = pd.read_sql_query(
+        """
         SELECT skill, topic, is_correct
         FROM assessment_answers
-    """, conn)
+        ORDER BY id DESC
+        """,
+        conn
+    )
 
     conn.close()
 
     recommendations = []
 
-    if df.empty:
+    if skills_df.empty:
+
+        return [
+            "Start by selecting a skill and completing an assessment."
+        ]
+
+    for _, row in skills_df.iterrows():
+
+        skill = row["skill"]
+
+        proven = row["proven"]
+
+        if pd.isna(proven):
+
+            recommendations.append(
+                f"{skill}: Complete an assessment to understand your current skill level."
+            )
+
+        elif proven < 40:
+
+            recommendations.append(
+                f"{skill}: Your current proven score is {proven}%. Revise basic concepts and practise beginner questions."
+            )
+
+        elif proven < 70:
+
+            recommendations.append(
+                f"{skill}: Your current proven score is {proven}%. Practise more questions and strengthen intermediate concepts."
+            )
+
+        else:
+
+            recommendations.append(
+                f"{skill}: Good progress with {proven}%. Try advanced topics and build a practical project."
+            )
+
+    if not history_df.empty:
+
+        latest = history_df.iloc[0]
 
         recommendations.append(
-            "Take your first assessment to receive personalized recommendations."
+            f"Your latest assessment was in {latest['skill']} with a score of {latest['score']}%."
         )
 
-    else:
+    if not answers_df.empty:
 
-        for skill in ["Python", "Java", "SQL"]:
-
-            skill_data = df[df["skill"] == skill]
-
-            if skill_data.empty:
-
-                recommendations.append(
-                    f"Start your {skill} Beginner assessment."
-                )
-
-                continue
-
-            latest = skill_data.iloc[0]
-            score = int(latest["score"])
-
-            if score < 40:
-
-                recommendations.append(
-                    f"{skill}: Revise basic concepts and practice more questions."
-                )
-
-            elif score < 70:
-
-                recommendations.append(
-                    f"{skill}: Practice intermediate topics."
-                )
-
-            else:
-
-                recommendations.append(
-                    f"{skill}: Good performance! Try the next level."
-                )
-
-    if not answers.empty:
-
-        incorrect = answers[
-            answers["is_correct"] == 0
+        incorrect = answers_df[
+            answers_df["is_correct"] == 0
         ]
 
         if not incorrect.empty:
 
             weak_topics = (
-                incorrect.groupby(["skill", "topic"])
+                incorrect.groupby("topic")
                 .size()
-                .reset_index(name="mistakes")
-                .sort_values("mistakes", ascending=False)
+                .sort_values(ascending=False)
             )
 
-            for _, row in weak_topics.head(3).iterrows():
+            for topic, count in weak_topics.head(3).items():
 
                 recommendations.append(
-                    f"Revise {row['topic']} in {row['skill']}."
+                    f"Revision priority: Practise {topic}. You answered {count} question(s) incorrectly in this topic."
                 )
 
     return recommendations
@@ -756,232 +872,217 @@ def create_pdf_report():
 
     buffer = io.BytesIO()
 
-    doc = SimpleDocTemplate(
+    document = SimpleDocTemplate(
         buffer,
-        pagesize=A4,
-        rightMargin=40,
-        leftMargin=40,
-        topMargin=40,
-        bottomMargin=40
+        pagesize=A4
     )
 
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-        "ReportTitle",
+        "CustomTitle",
         parent=styles["Title"],
-        textColor=colors.HexColor("#B8860B"),
         alignment=TA_CENTER,
         fontSize=20,
-        spaceAfter=8
+        spaceAfter=20
     )
 
-    heading_style = ParagraphStyle(
-        "ReportHeading",
-        parent=styles["Heading2"],
-        textColor=colors.HexColor("#8A6508"),
-        spaceBefore=14,
-        spaceAfter=7
+    story = []
+
+    story.append(
+        Paragraph(
+            "SkillPath AI - Learning Progress Report",
+            title_style
+        )
     )
 
-    body_style = styles["BodyText"]
-
-    story = [
-        Paragraph("SkillPath AI - Progress Report", title_style),
+    story.append(
         Paragraph(
             f"Generated on: {datetime.now().strftime('%d-%m-%Y %I:%M %p')}",
-            ParagraphStyle("Date", parent=body_style, alignment=TA_CENTER)
-        ),
-        Spacer(1, 18)
-    ]
+            styles["Normal"]
+        )
+    )
+
+    story.append(Spacer(1, 20))
+
+    # Assessment history
 
     conn = get_connection()
 
-    history = pd.read_sql_query(
-        """SELECT skill, level, score, correct_answers,
-                  total_questions, attempted_at
-           FROM assessment_sessions ORDER BY id DESC""",
+    history_df = pd.read_sql_query(
+        """
+        SELECT skill, level, score,
+               correct_answers, total_questions, attempted_at
+        FROM assessment_sessions
+        ORDER BY id DESC
+        """,
+        conn
+    )
+
+    skills_df = pd.read_sql_query(
+        "SELECT * FROM skill_scores",
         conn
     )
 
     conn.close()
 
-    story.append(Paragraph("1. Assessment Summary", heading_style))
+    story.append(
+        Paragraph("Assessment History", styles["Heading2"])
+    )
 
-    if history.empty:
+    if not history_df.empty:
 
-        story.append(
-            Paragraph("No assessments completed yet.", body_style)
-        )
+        table_data = [[
+            "Skill",
+            "Level",
+            "Score",
+            "Correct",
+            "Total"
+        ]]
 
-    else:
-
-        average = round(float(history["score"].mean()), 1)
-
-        story.append(Paragraph(
-            f"Total assessments: {len(history)} | Average score: {average}%",
-            body_style
-        ))
-
-        table_data = [["Skill", "Level", "Score", "Correct", "Date"]]
-
-        for _, row in history.head(25).iterrows():
+        for _, row in history_df.iterrows():
 
             table_data.append([
+
                 str(row["skill"]),
+
                 str(row["level"]),
-                f"{int(row['score'])}%",
-                f"{int(row['correct_answers'])}/{int(row['total_questions'])}",
-                str(row["attempted_at"])
+
+                str(row["score"]) + "%",
+
+                str(row["correct_answers"]),
+
+                str(row["total_questions"])
             ])
 
         table = Table(
             table_data,
-            repeatRows=1,
-            colWidths=[85, 75, 55, 65, 125]
+            repeatRows=1
         )
 
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#253047")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-             [colors.white, colors.HexColor("#F1F3F6")]),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("PADDING", (0, 0), (-1, -1), 5)
-        ]))
+        table.setStyle(
+            TableStyle([
 
-        story.extend([Spacer(1, 8), table])
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#222222")),
 
-    story.append(Paragraph("2. Resume Analysis", heading_style))
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
 
-    resume_skills = st.session_state.get("resume_skills")
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
 
-    if resume_skills is not None:
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
 
-        resume_score = st.session_state.get("resume_score", 0)
+                ("PADDING", (0, 0), (-1, -1), 7)
+            ])
+        )
 
-        story.append(Paragraph(
-            f"Resume skill coverage: {resume_score}% "
-            f"({len(resume_skills)} skill categories detected)",
-            body_style
-        ))
-
-        story.append(Paragraph(
-            "Detected categories: " + (
-                ", ".join(resume_skills) if resume_skills else "None detected"
-            ),
-            body_style
-        ))
-
-        missing = [
-            skill for skill in SKILL_KEYWORDS
-            if skill not in resume_skills
-        ]
-
-        story.append(Paragraph(
-            "Skills to develop: " + (
-                ", ".join(missing) if missing else "None"
-            ),
-            body_style
-        ))
+        story.append(table)
 
     else:
 
-        story.append(Paragraph(
-            "No resume has been analyzed in this session. "
-            "Use the Resume Analyzer page first to include resume results.",
-            body_style
-        ))
+        story.append(
+            Paragraph(
+                "No assessments completed yet.",
+                styles["Normal"]
+            )
+        )
 
-    story.append(Paragraph("3. Job Role Matching", heading_style))
+    story.append(Spacer(1, 20))
 
-    if resume_skills is not None:
+    # Skill profile
 
-        matches = calculate_job_matches(resume_skills)
+    story.append(
+        Paragraph("Skill Profile", styles["Heading2"])
+    )
 
-        match_data = [
-            ["Job Role", "Match", "Matched Categories", "To Develop"]
-        ]
+    if not skills_df.empty:
 
-        for item in matches:
+        skill_data = [[
+            "Skill",
+            "Claimed",
+            "Practiced",
+            "Proven"
+        ]]
 
-            match_data.append([
-                item["Job Role"],
-                f'{item["Match"]}%',
-                ", ".join(item["Matched Skills"]) or "-",
-                ", ".join(item["Missing Skills"]) or "-"
+        for _, row in skills_df.iterrows():
+
+            proven = (
+                "Not Assessed"
+                if pd.isna(row["proven"])
+                else str(row["proven"]) + "%"
+            )
+
+            skill_data.append([
+
+                str(row["skill"]),
+
+                str(row["claimed"]),
+
+                str(row["practiced"]),
+
+                proven
             ])
 
-        match_table = Table(
-            match_data,
-            repeatRows=1,
-            colWidths=[105, 45, 130, 130]
+        skill_table = Table(
+            skill_data,
+            repeatRows=1
         )
 
-        match_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#253047")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("FONTSIZE", (0, 0), (-1, -1), 7),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-             [colors.white, colors.HexColor("#F1F3F6")]),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("PADDING", (0, 0), (-1, -1), 4)
-        ]))
+        skill_table.setStyle(
+            TableStyle([
 
-        story.append(match_table)
-        story.append(Spacer(1, 8))
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#222222")),
 
-        story.append(Paragraph(
-            "Note: Job match percentages are based on detected skill categories "
-            "only. They do not guarantee job eligibility or selection.",
-            body_style
-        ))
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
 
-    else:
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
 
-        story.append(Paragraph(
-            "Analyze a resume to include job role matching results.",
-            body_style
-        ))
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
 
-    story.append(Paragraph("4. Learning Recommendations", heading_style))
-
-    for recommendation in get_recommendations():
-
-        story.append(Paragraph("• " + recommendation, body_style))
-        story.append(Spacer(1, 4))
-
-    story.append(Spacer(1, 16))
-
-    story.append(Paragraph(
-        "This report is generated from the information available in SkillPath AI. "
-        "Resume analysis is keyword-based and should be used as a learning guide, "
-        "not as an official ATS score or hiring prediction.",
-        ParagraphStyle(
-            "Note",
-            parent=body_style,
-            fontSize=8,
-            textColor=colors.grey
+                ("PADDING", (0, 0), (-1, -1), 7)
+            ])
         )
-    ))
 
-    doc.build(story)
+        story.append(skill_table)
+
+    story.append(Spacer(1, 20))
+
+    # Recommendations
+
+    story.append(
+        Paragraph("Learning Recommendations", styles["Heading2"])
+    )
+
+    recommendations = get_recommendations()
+
+    for recommendation in recommendations:
+
+        safe_text = (
+            recommendation
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+        story.append(
+            Paragraph(
+                "• " + safe_text,
+                styles["Normal"]
+            )
+        )
+
+        story.append(Spacer(1, 6))
+
+    document.build(story)
 
     buffer.seek(0)
 
-    return buffer.getvalue()
-
-
-# =====================================================
+    return buffer
+    # =====================================================
 # NAVIGATION
 # =====================================================
 
-st.sidebar.title("🎯 SkillPath AI 2.3")
-
-st.sidebar.caption("Smart Skill Development Platform")
+st.sidebar.title("🎯 SkillPath AI")
+st.sidebar.caption("Your Personal Career Development Platform")
 
 page = st.sidebar.radio(
     "Navigation",
@@ -997,9 +1098,13 @@ page = st.sidebar.radio(
         "What-If Simulator",
         "Resume Analyzer",
         "Job Role Matching",
+        "Agentic Career Planner",
         "PDF Report Download"
     ]
 )
+
+st.sidebar.divider()
+st.sidebar.info("Build Skills. Prove Skills. Grow Your Career.")
 
 
 # =====================================================
@@ -1011,74 +1116,82 @@ if page == "Dashboard":
     st.title("🎯 SkillPath AI Dashboard")
 
     st.write(
-        "Track your skills, prove your knowledge and improve your career readiness."
+        "Welcome to your personal skill development platform."
     )
 
     skills_df = get_skills()
 
     conn = get_connection()
 
-    sessions = pd.read_sql_query(
+    history_df = pd.read_sql_query(
         "SELECT * FROM assessment_sessions",
         conn
     )
 
     conn.close()
 
-    total_assessments = len(sessions)
+    total_skills = len(skills_df)
 
-    average_score = (
-        round(sessions["score"].mean(), 1)
-        if not sessions.empty else 0
-    )
+    total_assessments = len(history_df)
 
-    if not sessions.empty:
-
-        strongest = sessions.groupby("skill")["score"].mean().idxmax()
-        weakest = sessions.groupby("skill")["score"].mean().idxmin()
-
+    if not history_df.empty:
+        average_score = round(history_df["score"].mean(), 1)
     else:
+        average_score = 0
 
-        strongest = "Not available"
-        weakest = "Not available"
+    col1, col2, col3 = st.columns(3)
 
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("Total Assessments", total_assessments)
-    col2.metric("Average Accuracy", f"{average_score}%")
-    col3.metric("Strongest Skill", strongest)
-    col4.metric("Needs Improvement", weakest)
+    col1.metric("Total Skills", total_skills)
+    col2.metric("Assessments", total_assessments)
+    col3.metric("Average Score", f"{average_score}%")
 
     st.divider()
 
-    st.subheader("📊 Your Skill Progress")
+    st.subheader("📊 Your Skill Overview")
 
-    chart_df = skills_df.melt(
-        id_vars=["skill"],
-        value_vars=["claimed", "practiced", "proven"],
-        var_name="Category",
-        value_name="Score"
-    )
+    if not skills_df.empty:
 
-    fig = px.bar(
-        chart_df,
-        x="skill",
-        y="Score",
-        color="Category",
-        barmode="group"
-    )
+        chart_df = skills_df.copy()
 
-    fig.update_layout(template="plotly_dark")
+        chart_df["proven"] = chart_df["proven"].fillna(0)
 
-    st.plotly_chart(fig, width="stretch")
+        fig = px.bar(
+            chart_df,
+            x="skill",
+            y="proven",
+            title="Proven Skill Scores",
+            labels={
+                "skill": "Skills",
+                "proven": "Score (%)"
+            }
+        )
 
-    st.info(
-        "Use Resume Analyzer to analyze your resume and discover your job opportunities."
-    )
+        fig.update_layout(
+            yaxis_range=[0, 100]
+        )
 
-    st.caption(
-        "A skill without an assessment will not have a proven score."
-    )
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    st.divider()
+
+    st.subheader("🚀 Quick Actions")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        st.info(
+            "Complete skill assessments to measure your actual knowledge."
+        )
+
+    with col2:
+
+        st.info(
+            "Explore career matches and personalized learning recommendations."
+        )
 
 
 # =====================================================
@@ -1087,50 +1200,72 @@ if page == "Dashboard":
 
 elif page == "Skill DNA":
 
-    st.title("🧬 Skill DNA Analysis")
+    st.title("🧬 Skill DNA")
+
+    st.write(
+        "Understand your current skills and identify your strengths."
+    )
 
     skills_df = get_skills()
 
-    for _, row in skills_df.iterrows():
+    st.subheader("Your Skill Profile")
 
-        st.subheader(row["skill"])
+    st.dataframe(
+        skills_df,
+        use_container_width=True
+    )
 
-        col1, col2, col3 = st.columns(3)
+    st.divider()
 
-        col1.metric("Claimed", f"{row['claimed']}%")
-        col2.metric("Practiced", f"{row['practiced']}%")
+    st.subheader("Add a Skill")
 
-        if pd.isna(row["proven"]):
+    skill_name = st.selectbox(
+        "Choose a skill",
+        list(SKILL_KEYWORDS.keys())
+    )
 
-            col3.metric("Proven", "Not Tested")
+    if st.button("Add Skill"):
 
-            st.info(
-                f"Complete a {row['skill']} assessment to verify this skill."
-            )
+        conn = get_connection()
 
-            continue
+        cur = conn.cursor()
 
-        else:
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO skill_scores
+            (skill, claimed, practiced, proven)
+            VALUES (?, 0, 0, NULL)
+            """,
+            (skill_name,)
+        )
 
-            proven_score = int(row["proven"])
+        conn.commit()
+        conn.close()
 
-            col3.metric("Proven", f"{proven_score}%")
+        st.success("Skill added successfully!")
+        st.rerun()
 
-        gap = int(row["claimed"]) - proven_score
+    st.divider()
 
-        if gap > 30:
+    if not skills_df.empty:
 
-            st.warning(
-                f"Your {row['skill']} skill has a {gap}% proof gap."
-            )
+        chart_df = skills_df.copy()
 
-        else:
+        chart_df["proven"] = chart_df["proven"].fillna(0)
 
-            st.success(
-                "Your demonstrated skill is closer to your claimed skill."
-            )
+        fig = px.bar(
+            chart_df,
+            x="skill",
+            y="proven",
+            title="Your Proven Skills"
+        )
 
-        st.progress(proven_score / 100)
+        fig.update_layout(yaxis_range=[0, 100])
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
 
 # =====================================================
@@ -1141,113 +1276,155 @@ elif page == "Skill Proof Lab":
 
     st.title("🧪 Skill Proof Lab")
 
-    language = st.selectbox(
+    st.write(
+        "Test your knowledge through skill-based assessments."
+    )
+
+    skill = st.selectbox(
         "Select Skill",
-        ["Python", "Java", "SQL"]
+        list(QUESTION_BANK.keys())
     )
 
     level = st.selectbox(
-        "Select Level",
+        "Select Difficulty",
         ["Beginner", "Intermediate", "Advanced"]
     )
 
-    questions = QUESTION_BANK[language][level]
+    questions = QUESTION_BANK[skill][level]
 
-    st.info("Each assessment contains 5 questions.")
+    st.divider()
 
-    with st.form("assessment_form"):
+    st.subheader(f"{skill} - {level} Assessment")
 
-        answers = []
+    answers = []
 
-        for i, item in enumerate(questions):
+    for index, question in enumerate(questions):
 
-            topic, question, options, correct, explanation = item
+        topic, question_text, options, correct, explanation = question
 
-            st.markdown(f"### Question {i + 1}")
+        st.markdown(
+            f"**Q{index + 1}. {question_text}**"
+        )
 
-            st.write(question)
+        selected = st.radio(
+            "Choose your answer",
+            options,
+            key=f"quiz_{skill}_{level}_{index}",
+            index=None
+        )
 
-            selected = st.radio(
-                f"Your answer - Question {i + 1}",
-                options,
-                key=f"{language}_{level}_{i}"
+        answers.append({
+            "topic": topic,
+            "question": question_text,
+            "selected": selected,
+            "correct": correct,
+            "explanation": explanation
+        })
+
+    if st.button(
+        "Submit Assessment",
+        use_container_width=True
+    ):
+
+        if any(answer["selected"] is None for answer in answers):
+
+            st.warning("Please answer all questions.")
+
+        else:
+
+            correct_count = sum(
+                1 for answer in answers
+                if answer["selected"] == answer["correct"]
             )
 
-            answers.append(selected)
+            total = len(questions)
 
-        submitted = st.form_submit_button("Submit Assessment")
+            score = round(
+                correct_count / total * 100
+            )
 
-    if submitted:
+            attempted_at = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
 
-        correct_count = sum(
-            answers[i] == questions[i][3]
-            for i in range(len(questions))
-        )
+            conn = get_connection()
 
-        score = int(
-            correct_count / len(questions) * 100
-        )
+            cur = conn.cursor()
 
-        attempted_at = datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+            cur.execute(
+                """
+                INSERT INTO assessment_sessions
+                (
+                    skill,
+                    level,
+                    score,
+                    correct_answers,
+                    total_questions,
+                    attempted_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    skill,
+                    level,
+                    score,
+                    correct_count,
+                    total,
+                    attempted_at
+                )
+            )
 
-        conn = get_connection()
-        cur = conn.cursor()
+            session_id = cur.lastrowid
 
-        cur.execute("""
-            INSERT INTO assessment_sessions
-            (skill, level, score, correct_answers,
-             total_questions, attempted_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            language,
-            level,
-            score,
-            correct_count,
-            len(questions),
-            attempted_at
-        ))
+            for answer in answers:
 
-        session_id = cur.lastrowid
+                is_correct = int(
+                    answer["selected"] == answer["correct"]
+                )
 
-        for i, item in enumerate(questions):
+                cur.execute(
+                    """
+                    INSERT INTO assessment_answers
+                    (
+                        session_id,
+                        skill,
+                        level,
+                        topic,
+                        question,
+                        selected_answer,
+                        correct_answer,
+                        is_correct,
+                        attempted_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        skill,
+                        level,
+                        answer["topic"],
+                        answer["question"],
+                        answer["selected"],
+                        answer["correct"],
+                        is_correct,
+                        attempted_at
+                    )
+                )
 
-            topic, question, options, correct, explanation = item
+            conn.commit()
+            conn.close()
 
-            cur.execute("""
-                INSERT INTO assessment_answers
-                (session_id, skill, level, topic, question,
-                 selected_answer, correct_answer, is_correct,
-                 attempted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                session_id,
-                language,
-                level,
-                topic,
-                question,
-                answers[i],
-                correct,
-                int(answers[i] == correct),
-                attempted_at
-            ))
+            update_proven_score(skill, score)
 
-        conn.commit()
-        conn.close()
+            st.session_state["last_assessment"] = {
+                "skill": skill,
+                "score": score,
+                "correct": correct_count,
+                "total": total,
+                "answers": answers
+            }
 
-        update_proven_score(language, score)
-
-        st.session_state["last_assessment"] = {
-            "skill": language,
-            "level": level,
-            "score": score,
-            "correct": correct_count
-        }
-
-        st.session_state["last_answers"] = answers
-
-        st.rerun()
+            st.rerun()
 
     if "last_assessment" in st.session_state:
 
@@ -1255,46 +1432,54 @@ elif page == "Skill Proof Lab":
 
         st.divider()
 
-        st.subheader("📊 Assessment Result")
+        st.subheader("📋 Assessment Result")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
-        col1.metric("Score", f"{result['score']}%")
+        col1.metric(
+            "Score",
+            f'{result["score"]}%'
+        )
 
         col2.metric(
             "Correct Answers",
-            f"{result['correct']}/5"
+            result["correct"]
         )
 
-        if result["score"] >= 80:
+        col3.metric(
+            "Total Questions",
+            result["total"]
+        )
 
-            st.success("Excellent performance!")
+        if result["score"] >= 70:
 
-        elif result["score"] >= 60:
-
-            st.info("Good progress. Practice more.")
+            st.success("Good work! Keep improving your skills.")
 
         else:
 
-            st.warning("Revise the topics and try again.")
-
-        st.subheader("📝 Answer Review")
-
-        for i, item in enumerate(
-            QUESTION_BANK[result["skill"]][result["level"]]
-        ):
-
-            topic, question, options, correct, explanation = item
-
-            st.write(f"**Question {i + 1}: {question}**")
-
-            st.write(
-                f"Your answer: {st.session_state['last_answers'][i]}"
+            st.warning(
+                "Keep practising. Review the explanations below."
             )
 
-            st.write(f"Correct answer: {correct}")
+        st.subheader("Answer Review")
 
-            st.caption(explanation)
+        for index, answer in enumerate(result["answers"]):
+
+            with st.expander(
+                f"Question {index + 1}: {answer['topic']}"
+            ):
+
+                st.write(answer["question"])
+
+                st.write(
+                    f"Your Answer: {answer['selected']}"
+                )
+
+                st.write(
+                    f"Correct Answer: {answer['correct']}"
+                )
+
+                st.info(answer["explanation"])
 
 
 # =====================================================
@@ -1307,34 +1492,47 @@ elif page == "Assessment History":
 
     conn = get_connection()
 
-    history = pd.read_sql_query("""
-        SELECT skill, level, score, correct_answers,
-               total_questions, attempted_at
+    history_df = pd.read_sql_query(
+        """
+        SELECT skill, level, score,
+               correct_answers, total_questions, attempted_at
         FROM assessment_sessions
         ORDER BY id DESC
-    """, conn)
+        """,
+        conn
+    )
 
     conn.close()
 
-    if history.empty:
+    if history_df.empty:
 
-        st.info("No assessment history available.")
+        st.info("No assessment records available.")
 
     else:
 
         st.dataframe(
-            history,
-            width="stretch",
-            hide_index=True
+            history_df,
+            use_container_width=True
         )
 
-        csv = history.to_csv(index=False).encode("utf-8")
+        st.subheader("Assessment Score Trend")
 
-        st.download_button(
-            "⬇️ Download History",
-            data=csv,
-            file_name="skillpath_history.csv",
-            mime="text/csv"
+        fig = px.line(
+            history_df.sort_values("attempted_at"),
+            x="attempted_at",
+            y="score",
+            color="skill",
+            markers=True,
+            title="Your Assessment Progress"
+        )
+
+        fig.update_layout(
+            yaxis_range=[0, 100]
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
         )
 
 
@@ -1344,27 +1542,22 @@ elif page == "Assessment History":
 
 elif page == "AI Recommendations":
 
-    st.title("🤖 AI Recommendations")
+    st.title("🤖 AI Learning Recommendations")
+
+    st.write(
+        "Recommendations based on your assessment performance."
+    )
 
     recommendations = get_recommendations()
 
-    for i, recommendation in enumerate(recommendations, 1):
+    for index, recommendation in enumerate(
+        recommendations,
+        1
+    ):
 
-        st.markdown(
-            f"""
-            <div>
-            <b>Recommendation {i}</b><br><br>
-            {recommendation}
-            </div>
-            """,
-            unsafe_allow_html=True
+        st.info(
+            f"{index}. {recommendation}"
         )
-
-        st.write("")
-
-    st.caption(
-        "These recommendations use rule-based performance analysis."
-    )
 
 
 # =====================================================
@@ -1377,95 +1570,79 @@ elif page == "Performance Analytics":
 
     conn = get_connection()
 
-    history = pd.read_sql_query("""
-        SELECT * FROM assessment_sessions
-        ORDER BY id ASC
-    """, conn)
-
-    answers = pd.read_sql_query("""
-        SELECT * FROM assessment_answers
-    """, conn)
+    history_df = pd.read_sql_query(
+        "SELECT * FROM assessment_sessions",
+        conn
+    )
 
     conn.close()
 
-    if history.empty:
+    if history_df.empty:
 
-        st.info("Complete assessments to view analytics.")
+        st.info("Complete an assessment to view analytics.")
 
     else:
 
-        language_avg = (
-            history.groupby("skill")["score"]
+        average = round(
+            history_df["score"].mean(),
+            1
+        )
+
+        highest = history_df["score"].max()
+
+        lowest = history_df["score"].min()
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric("Average Score", f"{average}%")
+
+        col2.metric("Highest Score", f"{highest}%")
+
+        col3.metric("Lowest Score", f"{lowest}%")
+
+        st.divider()
+
+        skill_performance = (
+            history_df.groupby("skill")["score"]
             .mean()
             .reset_index()
         )
 
         fig = px.bar(
-            language_avg,
+            skill_performance,
             x="skill",
             y="score",
-            color="skill",
-            title="Language-wise Performance"
+            title="Average Performance by Skill"
         )
 
-        fig.update_layout(template="plotly_dark")
+        fig.update_layout(
+            yaxis_range=[0, 100]
+        )
 
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
-        level_avg = (
-            history.groupby(["skill", "level"])["score"]
+        st.subheader("Performance by Difficulty")
+
+        level_performance = (
+            history_df.groupby("level")["score"]
             .mean()
             .reset_index()
         )
 
         fig2 = px.bar(
-            level_avg,
+            level_performance,
             x="level",
             y="score",
-            color="skill",
-            barmode="group",
-            title="Level-wise Performance"
+            title="Average Score by Difficulty"
         )
 
-        fig2.update_layout(template="plotly_dark")
-
-        st.plotly_chart(fig2, width="stretch")
-
-        fig3 = px.line(
-            history,
-            x="attempted_at",
-            y="score",
-            color="skill",
-            markers=True,
-            title="Assessment Progress"
+        st.plotly_chart(
+            fig2,
+            use_container_width=True
         )
-
-        fig3.update_layout(template="plotly_dark")
-
-        st.plotly_chart(fig3, width="stretch")
-
-        if not answers.empty:
-
-            mistakes = answers[
-                answers["is_correct"] == 0
-            ]
-
-            if not mistakes.empty:
-
-                weak_topics = (
-                    mistakes.groupby(["skill", "topic"])
-                    .size()
-                    .reset_index(name="Mistakes")
-                    .sort_values("Mistakes", ascending=False)
-                )
-
-                st.subheader("Topics to Improve")
-
-                st.dataframe(
-                    weak_topics,
-                    width="stretch",
-                    hide_index=True
-                )
 
 
 # =====================================================
@@ -1476,50 +1653,38 @@ elif page == "Career Intelligence":
 
     st.title("💼 Career Intelligence")
 
-    skills_df = get_skills()
-
-    technical = skills_df[
-        skills_df["skill"].isin(["Python", "Java", "SQL"])
-    ].copy()
-
-    assessed_skills = technical.dropna(
-        subset=["proven"]
+    st.write(
+        "Explore career requirements and compare them with your skills."
     )
 
-    if assessed_skills.empty:
+    selected_role = st.selectbox(
+        "Choose a career",
+        list(JOB_ROLES.keys())
+    )
 
-        st.metric(
-            "Technical Skill Readiness",
-            "Not Tested"
-        )
+    required_skills = JOB_ROLES[selected_role]
 
-        st.info(
-            "Complete at least one Python, Java or SQL assessment "
-            "to calculate your technical readiness."
-        )
+    st.subheader(selected_role)
 
-    else:
+    st.write("Skills required for this career:")
 
-        readiness = round(
-            assessed_skills["proven"].mean()
-        )
+    for skill in required_skills:
 
-        st.metric(
-            "Technical Skill Readiness",
-            f"{readiness}%"
-        )
+        st.success(skill)
 
-        st.progress(readiness / 100)
+    st.divider()
 
-        st.caption(
-            f"Calculated using {len(assessed_skills)} assessed technical skill(s)."
-        )
+    st.subheader("Career Preparation Suggestions")
 
-    st.subheader("Suggested Career Paths")
+    st.write("• Build at least two practical projects.")
 
-    for role in JOB_ROLES:
+    st.write("• Maintain a GitHub profile.")
 
-        st.write(f"**{role}**")
+    st.write("• Practise technical interview questions.")
+
+    st.write("• Improve communication and presentation skills.")
+
+    st.write("• Complete assessments to prove your knowledge.")
 
 
 # =====================================================
@@ -1528,58 +1693,61 @@ elif page == "Career Intelligence":
 
 elif page == "Adaptive Learning":
 
-    st.title("🧠 Adaptive Learning Path")
+    st.title("🧠 Adaptive Learning")
+
+    st.write(
+        "Learning suggestions based on your assessment scores."
+    )
 
     conn = get_connection()
 
-    history = pd.read_sql_query("""
+    history_df = pd.read_sql_query(
+        """
         SELECT skill, level, score
         FROM assessment_sessions
         ORDER BY id DESC
-    """, conn)
+        """,
+        conn
+    )
 
     conn.close()
 
-    for skill in ["Python", "Java", "SQL"]:
+    if history_df.empty:
 
-        st.subheader(skill)
+        st.info(
+            "Complete an assessment to receive adaptive learning suggestions."
+        )
 
-        skill_history = history[
-            history["skill"] == skill
-        ]
+    else:
 
-        if skill_history.empty:
+        latest_scores = (
+            history_df.drop_duplicates("skill")
+        )
 
-            st.info(
-                f"Start {skill} Beginner assessment."
-            )
+        for _, row in latest_scores.iterrows():
 
-        else:
+            skill = row["skill"]
 
-            latest = skill_history.iloc[0]
+            score = row["score"]
 
-            score = int(latest["score"])
-            level = latest["level"]
+            st.subheader(skill)
 
-            if score >= 80:
+            if score < 40:
 
-                if level == "Beginner":
-                    next_level = "Intermediate"
+                st.warning(
+                    "Focus on beginner concepts and practise basic questions."
+                )
 
-                elif level == "Intermediate":
-                    next_level = "Advanced"
+            elif score < 70:
 
-                else:
-                    next_level = "Advanced practice"
-
-                st.success(
-                    f"Recommended next step: {next_level}"
+                st.info(
+                    "Practise intermediate topics and strengthen your understanding."
                 )
 
             else:
 
-                st.warning(
-                    f"Revise {level} topics and retake assessment."
+                st.success(
+                    "Good performance! Try advanced topics and practical projects."
                 )
 
 
@@ -1591,123 +1759,68 @@ elif page == "What-If Simulator":
 
     st.title("🔮 What-If Simulator")
 
-    skills_df = get_skills()
+    st.write(
+        "Explore how additional assessment scores could affect your average."
+    )
 
-    current_scores = {}
+    conn = get_connection()
 
-    for skill in ["Python", "Java", "SQL"]:
+    history_df = pd.read_sql_query(
+        "SELECT score FROM assessment_sessions",
+        conn
+    )
 
-        skill_data = skills_df[
-            skills_df["skill"] == skill
-        ]
+    conn.close()
 
-        if not skill_data.empty and pd.notna(
-            skill_data["proven"].iloc[0]
-        ):
+    if history_df.empty:
 
-            current_scores[skill] = int(
-                skill_data["proven"].iloc[0]
-            )
-
-        else:
-
-            current_scores[skill] = None
-
-    assessed_scores = [
-        score for score in current_scores.values()
-        if score is not None
-    ]
-
-    if assessed_scores:
-
-        current = round(
-            sum(assessed_scores) / len(assessed_scores)
-        )
-
-        st.metric(
-            "Current Average (Assessed Skills)",
-            f"{current}%"
+        st.info(
+            "Complete at least one assessment to use the simulator."
         )
 
     else:
 
-        current = 0
+        current_average = history_df["score"].mean()
 
-        st.metric(
-            "Current Average",
-            "Not Tested"
-        )
-
-        st.info(
-            "Complete an assessment to get your actual current score."
-        )
-
-    st.divider()
-
-    st.subheader("Set Your Target Scores")
-
-    targets = {}
-
-    for skill in ["Python", "Java", "SQL"]:
-
-        default_value = (
-            current_scores[skill]
-            if current_scores[skill] is not None
-            else 0
-        )
-
-        if current_scores[skill] is None:
-
-            st.caption(
-                f"{skill}: Not Tested yet. Set a target for simulation."
-            )
-
-        targets[skill] = st.slider(
-            f"{skill} Target",
+        simulated_score = st.slider(
+            "Choose a hypothetical next assessment score",
             0,
             100,
-            default_value
+            80
         )
 
-    predicted = round(
-        sum(targets.values()) / 3
-    )
+        simulated_average = (
+            current_average * len(history_df) + simulated_score
+        ) / (len(history_df) + 1)
 
-    st.metric(
-        "Predicted Technical Readiness",
-        f"{predicted}%"
-    )
-
-    if assessed_scores:
-
-        difference = predicted - current
-
-        if difference > 0:
-
-            st.success(
-                f"Readiness improves by {difference}% in this simulation."
-            )
-
-        elif difference < 0:
-
-            st.warning(
-                f"Readiness decreases by {abs(difference)}% in this simulation."
-            )
-
-        else:
-
-            st.info("Readiness remains the same.")
-
-    else:
-
-        st.info(
-            "This is only a target simulation. "
-            "It does not represent your actual assessment performance."
+        improvement = (
+            simulated_average - current_average
         )
 
-    st.caption(
-        "Simulation does not change actual assessment records."
-    )
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Current Average",
+            f"{current_average:.1f}%"
+        )
+
+        col2.metric(
+            "Simulated Average",
+            f"{simulated_average:.1f}%"
+        )
+
+        col3.metric(
+            "Improvement",
+            f"{improvement:+.1f}%"
+        )
+
+        st.progress(
+            min(max(simulated_average / 100, 0), 1)
+        )
+
+        st.caption(
+            "Simulation does not change actual assessment records."
+        )
 
 
 # =====================================================
@@ -1716,139 +1829,84 @@ elif page == "What-If Simulator":
 
 elif page == "Resume Analyzer":
 
-    st.title("📄 Resume Intelligence Analyzer")
+    st.title("📄 Resume Analyzer")
 
     st.write(
-        "Upload your resume to identify skills and understand your resume coverage."
+        "Upload your resume to identify skills and improve your career profile."
     )
 
     uploaded_file = st.file_uploader(
-        "Upload your Resume",
+        "Upload Resume",
         type=["pdf", "docx", "txt"]
     )
 
-    if uploaded_file is not None:
+    if uploaded_file:
 
-        if st.button("Analyze My Resume"):
+        resume_text = extract_resume_text(uploaded_file)
 
-            resume_text = extract_resume_text(
-                uploaded_file
+        if resume_text.strip():
+
+            analysis = analyze_resume(resume_text)
+
+            st.session_state["resume_analysis"] = analysis
+
+            st.subheader("Resume Overview")
+
+            col1, col2 = st.columns(2)
+
+            col1.metric(
+                "Detected Skills",
+                analysis["skill_count"]
             )
 
-            if resume_text:
+            col2.metric(
+                "Word Count",
+                analysis["word_count"]
+            )
 
-                if len(resume_text.strip()) < 30:
+            st.divider()
 
-                    st.warning(
-                        "Very little text was extracted. "
-                        "If this is a scanned PDF, OCR may be required."
-                    )
+            st.subheader("Detected Skills")
+
+            if analysis["detected_skills"]:
+
+                for skill in analysis["detected_skills"]:
+
+                    st.success(skill)
+
+            else:
+
+                st.warning(
+                    "No supported skills detected. Add relevant skill names to your resume."
+                )
+
+            st.divider()
+
+            st.subheader("Resume Section Analysis")
+
+            for section, found in analysis["sections"].items():
+
+                if found:
+
+                    st.success(f"{section}: Found")
 
                 else:
 
-                    result = analyze_resume(
-                        resume_text
-                    )
+                    st.warning(f"{section}: Not Found")
 
-                    st.session_state["resume_text"] = resume_text
+            st.divider()
 
-                    st.session_state["resume_skills"] = result["detected"]
+            st.subheader("Improvement Suggestions")
 
-                    st.session_state["resume_score"] = result["score"]
+            for suggestion in analysis["suggestions"]:
 
-                    st.rerun()
-
-    if "resume_skills" in st.session_state:
-
-        st.divider()
-
-        st.subheader("📊 Resume Analysis Result")
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "Resume Skill Coverage",
-            f"{st.session_state['resume_score']}%"
-        )
-
-        col2.metric(
-            "Detected Skill Categories",
-            len(st.session_state["resume_skills"])
-        )
-
-        st.progress(
-            st.session_state["resume_score"] / 100
-        )
-
-        st.subheader("✅ Detected Skills")
-
-        if st.session_state["resume_skills"]:
-
-            for skill in st.session_state["resume_skills"]:
-
-                st.success(skill)
+                st.info(suggestion)
 
         else:
 
-            st.warning(
-                "No supported skills were detected. "
-                "Check whether your resume contains a readable skills section."
+            st.error(
+                "Could not extract text. Please upload a readable PDF, DOCX or TXT file."
             )
-
-        st.subheader("💡 Skills You Can Add or Develop")
-
-        missing = [
-            skill
-            for skill in SKILL_KEYWORDS
-            if skill not in st.session_state["resume_skills"]
-        ]
-
-        for skill in missing:
-
-            st.write(f"• {skill}")
-
-        st.info(
-            "Only include skills you genuinely know. "
-            "Do not add a skill to your resume just to increase the score."
-        )
-
-        st.subheader("📝 Resume Improvement Suggestions")
-
-        resume_text = st.session_state["resume_text"].lower()
-
-        if "project" not in resume_text:
-
-            st.write(
-                "• Add a Projects section with your project descriptions."
-            )
-
-        if "education" not in resume_text:
-
-            st.write(
-                "• Add an Education section."
-            )
-
-        if "experience" not in resume_text:
-
-            st.write(
-                "• Add internship, work experience or practical project experience if available."
-            )
-
-        if "github" not in resume_text:
-
-            st.write(
-                "• Add your GitHub profile if you have relevant code repositories."
-            )
-
-        if "certification" not in resume_text:
-
-            st.write(
-                "• Include relevant certifications if you have completed any."
-            )
-
-        st.caption(
-            "This is a keyword-based resume analysis, not an ATS certification or hiring prediction."
-        )
 
 
 # =====================================================
@@ -1857,97 +1915,270 @@ elif page == "Resume Analyzer":
 
 elif page == "Job Role Matching":
 
-    st.title("💼 Job Role Matching")
+    st.title("🎯 Job Role Matching")
 
     st.write(
-        "Find job roles that match the skills detected in your resume."
+        "Find career roles that match your current skills."
     )
 
-    if "resume_skills" not in st.session_state:
+    selected_skills = st.multiselect(
+        "Select your skills",
+        options=list(SKILL_KEYWORDS.keys())
+    )
 
-        st.warning(
-            "Please analyze your resume first in the Resume Analyzer page."
-        )
+    if st.button(
+        "Find Matching Careers",
+        use_container_width=True
+    ):
 
-    else:
+        if not selected_skills:
 
-        detected_skills = st.session_state["resume_skills"]
+            st.warning("Select at least one skill.")
 
-        st.subheader("Your Detected Skills")
+        else:
 
-        st.write(", ".join(detected_skills))
+            matches = calculate_job_matches(
+                selected_skills
+            )
 
-        matches = calculate_job_matches(
-            detected_skills
-        )
+            st.session_state["job_matches"] = matches
+
+    if "job_matches" in st.session_state:
+
+        matches = st.session_state["job_matches"]
 
         st.divider()
 
-        st.subheader("🎯 Recommended Job Roles")
+        st.subheader("Career Match Results")
 
-        for result in matches:
+        for item in matches:
 
             with st.expander(
-                f"{result['Job Role']} — {result['Match']}% Match"
+                f'{item["Role"]} - {item["Match"]}% Match'
             ):
 
                 st.progress(
-                    result["Match"] / 100
+                    item["Match"] / 100
                 )
 
-                st.write("**Matching Skills**")
-
-                if result["Matched Skills"]:
-
-                    for skill in result["Matched Skills"]:
-
-                        st.success(skill)
-
-                else:
-
-                    st.write("No matching skills detected yet.")
-
-                st.write("**Skills to Develop**")
-
-                if result["Missing Skills"]:
-
-                    for skill in result["Missing Skills"]:
-
-                        st.warning(skill)
-
-                else:
-
-                    st.success(
-                        "All listed required skills were detected!"
-                    )
-
-                st.info(
-                    "Match percentage is based only on the listed skill categories. "
-                    "It does not guarantee job eligibility or selection."
+                st.write(
+                    "**Matched Skills:**",
+                    item["Matched Skills"] or "None"
                 )
+
+                st.write(
+                    "**Skills to Develop:**",
+                    item["Missing Skills"] or "None"
+                )
+
+
+# =====================================================
+# AGENTIC CAREER PLANNER
+# =====================================================
+
+elif page == "Agentic Career Planner":
+
+    st.title("🤖 Agentic Career Planner")
+
+    st.write(
+        "Four specialized agents collaborate to analyze your skills, "
+        "identify skill gaps, create a learning roadmap and provide "
+        "performance-based mentoring."
+    )
+
+    st.divider()
+
+    st.subheader("👤 Learner Profile")
+
+    current_skills = st.multiselect(
+        "Select the skills you currently know",
+        options=list(SKILL_KEYWORDS.keys()),
+        default=["Python", "SQL"]
+    )
+
+    target_role = st.selectbox(
+        "Choose your target career",
+        list(JOB_ROLES.keys())
+    )
+
+    if st.button(
+        "🚀 Run Agent Collaboration",
+        use_container_width=True
+    ):
+
+        conn = get_connection()
+
+        history_df = pd.read_sql_query(
+            """
+            SELECT skill, score, level, attempted_at
+            FROM assessment_sessions
+            ORDER BY id DESC
+            """,
+            conn
+        )
+
+        conn.close()
+
+        history = history_df.to_dict("records")
+
+        result = run_agentic_workflow(
+            current_skills,
+            history,
+            target_role,
+            JOB_ROLES
+        )
+
+        st.session_state["agentic_result"] = result
+
+        st.session_state["agentic_role"] = target_role
+
+    if "agentic_result" in st.session_state:
+
+        result = st.session_state["agentic_result"]
+
+        gaps = result["skill_analysis"]
 
         st.divider()
 
-        st.subheader("📚 Your Next Learning Steps")
+        st.subheader("📊 Career Readiness")
 
-        best_match = matches[0]
+        col1, col2, col3 = st.columns(3)
 
-        if best_match["Missing Skills"]:
+        col1.metric(
+            "Career Skill Match",
+            f'{gaps["match_percentage"]}%'
+        )
 
-            st.write(
-                f"To improve your {best_match['Job Role']} skill match, "
-                "focus on:"
-            )
+        col2.metric(
+            "Matched Skills",
+            len(gaps["matched_skills"])
+        )
 
-            for skill in best_match["Missing Skills"]:
+        col3.metric(
+            "Skills to Learn",
+            len(gaps["missing_skills"])
+        )
 
-                st.write(f"• {skill}")
+        st.progress(
+            gaps["match_percentage"] / 100
+        )
+
+        st.divider()
+
+        st.subheader("🤝 Agent Collaboration Log")
+
+        for agent in result["agent_trace"]:
+
+            with st.expander(
+                f'{agent["agent"]} - {agent["status"]}'
+            ):
+
+                st.write(agent["action"])
+
+        st.divider()
+
+        st.subheader("✅ Existing Skills")
+
+        if gaps["matched_skills"]:
+
+            for skill in gaps["matched_skills"]:
+
+                st.success(skill)
+
+        else:
+
+            st.info("No matching skills selected.")
+
+        st.subheader("🎯 Skills to Develop")
+
+        if gaps["missing_skills"]:
+
+            for skill in gaps["missing_skills"]:
+
+                st.warning(skill)
 
         else:
 
             st.success(
-                "Your detected skills cover all the listed skills for this role."
+                "All listed skills for this career are selected!"
             )
+
+        st.divider()
+
+        st.subheader("🗺️ Personalized Learning Roadmap")
+
+        total_tasks = 0
+
+        completed_tasks = 0
+
+        for index, item in enumerate(
+            result["learning_roadmap"],
+            1
+        ):
+
+            with st.expander(
+                f'{index}. {item["skill"]}'
+            ):
+
+                for task_no, task in enumerate(
+                    item["tasks"],
+                    1
+                ):
+
+                    key = (
+                        f'agent_task_{target_role}_'
+                        f'{item["skill"]}_{task_no}'
+                    )
+
+                    completed = st.checkbox(
+                        task,
+                        key=key
+                    )
+
+                    total_tasks += 1
+
+                    if completed:
+
+                        completed_tasks += 1
+
+        if total_tasks > 0:
+
+            st.metric(
+                "Completed Learning Tasks",
+                f"{completed_tasks}/{total_tasks}"
+            )
+
+            st.progress(
+                completed_tasks / total_tasks
+            )
+
+        else:
+
+            st.success(
+                "No skill gaps found. Start building practical projects!"
+            )
+
+        st.divider()
+
+        st.subheader("🧑‍🏫 AI Mentor Guidance")
+
+        for guidance in result["mentor"]["guidance"]:
+
+            st.info(guidance)
+
+        if result["mentor"]["priority_skills"]:
+
+            st.warning(
+                "Priority Revision: " +
+                ", ".join(
+                    result["mentor"]["priority_skills"]
+                )
+            )
+
+        st.caption(
+            "Prototype: Four coordinated rule-based agents. "
+            "No external LLM API is connected."
+        )
 
 
 # =====================================================
@@ -1956,40 +2187,39 @@ elif page == "Job Role Matching":
 
 elif page == "PDF Report Download":
 
-    st.title("📥 Download Your SkillPath AI Report")
+    st.title("📥 PDF Report Download")
 
     st.write(
-        "Download a PDF summary containing your assessment history, "
-        "resume skill analysis, job role matches and learning recommendations."
+        "Generate a report containing your skill profile, "
+        "assessment history and learning recommendations."
     )
 
-    st.info(
-        "For resume and job matching details, analyze your resume first "
-        "in the Resume Analyzer page. Assessment history is included automatically."
-    )
-
-    if st.button("🔄 Generate PDF Report"):
+    if st.button(
+        "Generate PDF Report",
+        use_container_width=True
+    ):
 
         try:
 
-            pdf_data = create_pdf_report()
+            pdf_file = create_pdf_report()
 
-            st.session_state["skillpath_pdf_report"] = pdf_data
+            st.download_button(
+                label="⬇️ Download Your Report",
+                data=pdf_file,
+                file_name="SkillPath_AI_Report.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
 
-            st.success("Your PDF report is ready!")
+            st.success(
+                "Your PDF report is ready!"
+            )
 
         except Exception as error:
 
-            st.error(f"Unable to generate PDF report: {error}")
-
-    if "skillpath_pdf_report" in st.session_state:
-
-        st.download_button(
-            label="⬇️ Download SkillPath AI Report (PDF)",
-            data=st.session_state["skillpath_pdf_report"],
-            file_name="SkillPath_AI_Progress_Report.pdf",
-            mime="application/pdf"
-        )
+            st.error(
+                f"Unable to generate PDF: {error}"
+            )
 
 
 # =====================================================
@@ -1998,8 +2228,6 @@ elif page == "PDF Report Download":
 
 st.sidebar.divider()
 
-st.sidebar.caption("SkillPath AI 2.3")
-
 st.sidebar.caption(
-    "Smart Learning • Resume Intelligence • Career Matching"
+    "SkillPath AI 2.3 | Personalized Learning & Career Intelligence"
 )
