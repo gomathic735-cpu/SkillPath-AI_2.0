@@ -76,10 +76,10 @@ def initialize_database():
     """)
 
     default_skills = [
-        ("Python", 80, 60, 35),
-        ("Java", 50, 30, 0),
-        ("SQL", 60, 40, 0),
-        ("Communication", 85, 70, 0)
+        ("Python", 0, 0, None),
+        ("Java", 0, 0, None),
+        ("SQL", 0, 0, None),
+        ("Communication", 0, 0, None)
     ]
 
     for skill in default_skills:
@@ -89,6 +89,35 @@ def initialize_database():
             (skill, claimed, practiced, proven)
             VALUES (?, ?, ?, ?)
         """, skill)
+
+        # Get actual assessment score
+        cur.execute("""
+            SELECT MAX(score)
+            FROM assessment_sessions
+            WHERE skill=?
+        """, (skill[0],))
+
+        actual_score = cur.fetchone()[0]
+
+        if actual_score is None:
+
+            # No assessment completed: remove sample scores
+            cur.execute("""
+                UPDATE skill_scores
+                SET claimed=0,
+                    practiced=0,
+                    proven=NULL
+                WHERE skill=?
+            """, (skill[0],))
+
+        else:
+
+            # Only actual assessment score is considered
+            cur.execute("""
+                UPDATE skill_scores
+                SET proven=?
+                WHERE skill=?
+            """, (actual_score, skill[0]))
 
     conn.commit()
     conn.close()
@@ -116,21 +145,22 @@ def update_proven_score(skill, new_score):
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute(
-        "SELECT proven FROM skill_scores WHERE skill=?",
-        (skill,)
-    )
+    cur.execute("""
+        SELECT proven
+        FROM skill_scores
+        WHERE skill=?
+    """, (skill,))
 
     result = cur.fetchone()
 
     if result:
 
-        old_score = result[0] or 0
+        old_score = result[0]
 
-        updated_score = max(
-            old_score,
-            new_score
-        )
+        if old_score is None:
+            updated_score = new_score
+        else:
+            updated_score = max(old_score, new_score)
 
         cur.execute("""
             UPDATE skill_scores
@@ -507,7 +537,6 @@ def extract_resume_text(uploaded_file):
             text_content = ""
 
             for page in reader.pages:
-
                 text_content += page.extract_text() or ""
 
             return text_content
@@ -724,8 +753,9 @@ def get_recommendations():
 # =====================================================
 
 def create_pdf_report():
-    """Create a downloadable PDF summary of SkillPath AI progress."""
+
     buffer = io.BytesIO()
+
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
@@ -736,6 +766,7 @@ def create_pdf_report():
     )
 
     styles = getSampleStyleSheet()
+
     title_style = ParagraphStyle(
         "ReportTitle",
         parent=styles["Title"],
@@ -744,6 +775,7 @@ def create_pdf_report():
         fontSize=20,
         spaceAfter=8
     )
+
     heading_style = ParagraphStyle(
         "ReportHeading",
         parent=styles["Heading2"],
@@ -751,6 +783,7 @@ def create_pdf_report():
         spaceBefore=14,
         spaceAfter=7
     )
+
     body_style = styles["BodyText"]
 
     story = [
@@ -763,25 +796,37 @@ def create_pdf_report():
     ]
 
     conn = get_connection()
+
     history = pd.read_sql_query(
         """SELECT skill, level, score, correct_answers,
                   total_questions, attempted_at
            FROM assessment_sessions ORDER BY id DESC""",
         conn
     )
+
     conn.close()
 
     story.append(Paragraph("1. Assessment Summary", heading_style))
+
     if history.empty:
-        story.append(Paragraph("No assessments completed yet.", body_style))
+
+        story.append(
+            Paragraph("No assessments completed yet.", body_style)
+        )
+
     else:
+
         average = round(float(history["score"].mean()), 1)
+
         story.append(Paragraph(
             f"Total assessments: {len(history)} | Average score: {average}%",
             body_style
         ))
+
         table_data = [["Skill", "Level", "Score", "Correct", "Date"]]
+
         for _, row in history.head(25).iterrows():
+
             table_data.append([
                 str(row["skill"]),
                 str(row["level"]),
@@ -789,7 +834,13 @@ def create_pdf_report():
                 f"{int(row['correct_answers'])}/{int(row['total_questions'])}",
                 str(row["attempted_at"])
             ])
-        table = Table(table_data, repeatRows=1, colWidths=[85, 75, 55, 65, 125])
+
+        table = Table(
+            table_data,
+            repeatRows=1,
+            colWidths=[85, 75, 55, 65, 125]
+        )
+
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#253047")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -800,29 +851,44 @@ def create_pdf_report():
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("PADDING", (0, 0), (-1, -1), 5)
         ]))
+
         story.extend([Spacer(1, 8), table])
 
     story.append(Paragraph("2. Resume Analysis", heading_style))
+
     resume_skills = st.session_state.get("resume_skills")
+
     if resume_skills is not None:
+
         resume_score = st.session_state.get("resume_score", 0)
+
         story.append(Paragraph(
             f"Resume skill coverage: {resume_score}% "
             f"({len(resume_skills)} skill categories detected)",
             body_style
         ))
+
         story.append(Paragraph(
             "Detected categories: " + (
                 ", ".join(resume_skills) if resume_skills else "None detected"
             ),
             body_style
         ))
-        missing = [skill for skill in SKILL_KEYWORDS if skill not in resume_skills]
+
+        missing = [
+            skill for skill in SKILL_KEYWORDS
+            if skill not in resume_skills
+        ]
+
         story.append(Paragraph(
-            "Skills to develop: " + (", ".join(missing) if missing else "None"),
+            "Skills to develop: " + (
+                ", ".join(missing) if missing else "None"
+            ),
             body_style
         ))
+
     else:
+
         story.append(Paragraph(
             "No resume has been analyzed in this session. "
             "Use the Resume Analyzer page first to include resume results.",
@@ -830,21 +896,30 @@ def create_pdf_report():
         ))
 
     story.append(Paragraph("3. Job Role Matching", heading_style))
+
     if resume_skills is not None:
+
         matches = calculate_job_matches(resume_skills)
-        match_data = [["Job Role", "Match", "Matched Categories", "To Develop"]]
+
+        match_data = [
+            ["Job Role", "Match", "Matched Categories", "To Develop"]
+        ]
+
         for item in matches:
+
             match_data.append([
                 item["Job Role"],
                 f'{item["Match"]}%',
                 ", ".join(item["Matched Skills"]) or "-",
                 ", ".join(item["Missing Skills"]) or "-"
             ])
+
         match_table = Table(
             match_data,
             repeatRows=1,
             colWidths=[105, 45, 130, 130]
         )
+
         match_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#253047")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -855,34 +930,48 @@ def create_pdf_report():
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("PADDING", (0, 0), (-1, -1), 4)
         ]))
+
         story.append(match_table)
         story.append(Spacer(1, 8))
+
         story.append(Paragraph(
             "Note: Job match percentages are based on detected skill categories "
             "only. They do not guarantee job eligibility or selection.",
             body_style
         ))
+
     else:
+
         story.append(Paragraph(
             "Analyze a resume to include job role matching results.",
             body_style
         ))
 
     story.append(Paragraph("4. Learning Recommendations", heading_style))
+
     for recommendation in get_recommendations():
+
         story.append(Paragraph("• " + recommendation, body_style))
         story.append(Spacer(1, 4))
 
     story.append(Spacer(1, 16))
+
     story.append(Paragraph(
         "This report is generated from the information available in SkillPath AI. "
         "Resume analysis is keyword-based and should be used as a learning guide, "
         "not as an official ATS score or hiring prediction.",
-        ParagraphStyle("Note", parent=body_style, fontSize=8, textColor=colors.grey)
+        ParagraphStyle(
+            "Note",
+            parent=body_style,
+            fontSize=8,
+            textColor=colors.grey
+        )
     ))
 
     doc.build(story)
+
     buffer.seek(0)
+
     return buffer.getvalue()
 
 
@@ -987,6 +1076,10 @@ if page == "Dashboard":
         "Use Resume Analyzer to analyze your resume and discover your job opportunities."
     )
 
+    st.caption(
+        "A skill without an assessment will not have a proven score."
+    )
+
 
 # =====================================================
 # SKILL DNA
@@ -1006,9 +1099,24 @@ elif page == "Skill DNA":
 
         col1.metric("Claimed", f"{row['claimed']}%")
         col2.metric("Practiced", f"{row['practiced']}%")
-        col3.metric("Proven", f"{row['proven']}%")
 
-        gap = row["claimed"] - row["proven"]
+        if pd.isna(row["proven"]):
+
+            col3.metric("Proven", "Not Tested")
+
+            st.info(
+                f"Complete a {row['skill']} assessment to verify this skill."
+            )
+
+            continue
+
+        else:
+
+            proven_score = int(row["proven"])
+
+            col3.metric("Proven", f"{proven_score}%")
+
+        gap = int(row["claimed"]) - proven_score
 
         if gap > 30:
 
@@ -1018,9 +1126,11 @@ elif page == "Skill DNA":
 
         else:
 
-            st.success("Your demonstrated skill is closer to your claimed skill.")
+            st.success(
+                "Your demonstrated skill is closer to your claimed skill."
+            )
 
-        st.progress(int(row["proven"]) / 100)
+        st.progress(proven_score / 100)
 
 
 # =====================================================
@@ -1157,12 +1267,15 @@ elif page == "Skill Proof Lab":
         )
 
         if result["score"] >= 80:
+
             st.success("Excellent performance!")
 
         elif result["score"] >= 60:
+
             st.info("Good progress. Practice more.")
 
         else:
+
             st.warning("Revise the topics and try again.")
 
         st.subheader("📝 Answer Review")
@@ -1367,16 +1480,40 @@ elif page == "Career Intelligence":
 
     technical = skills_df[
         skills_df["skill"].isin(["Python", "Java", "SQL"])
-    ]
+    ].copy()
 
-    readiness = int(technical["proven"].mean())
-
-    st.metric(
-        "Technical Skill Readiness",
-        f"{readiness}%"
+    assessed_skills = technical.dropna(
+        subset=["proven"]
     )
 
-    st.progress(readiness / 100)
+    if assessed_skills.empty:
+
+        st.metric(
+            "Technical Skill Readiness",
+            "Not Tested"
+        )
+
+        st.info(
+            "Complete at least one Python, Java or SQL assessment "
+            "to calculate your technical readiness."
+        )
+
+    else:
+
+        readiness = round(
+            assessed_skills["proven"].mean()
+        )
+
+        st.metric(
+            "Technical Skill Readiness",
+            f"{readiness}%"
+        )
+
+        st.progress(readiness / 100)
+
+        st.caption(
+            f"Calculated using {len(assessed_skills)} assessed technical skill(s)."
+        )
 
     st.subheader("Suggested Career Paths")
 
@@ -1460,30 +1597,76 @@ elif page == "What-If Simulator":
 
     for skill in ["Python", "Java", "SQL"]:
 
-        current_scores[skill] = int(
-            skills_df[
-                skills_df["skill"] == skill
-            ]["proven"].iloc[0]
+        skill_data = skills_df[
+            skills_df["skill"] == skill
+        ]
+
+        if not skill_data.empty and pd.notna(
+            skill_data["proven"].iloc[0]
+        ):
+
+            current_scores[skill] = int(
+                skill_data["proven"].iloc[0]
+            )
+
+        else:
+
+            current_scores[skill] = None
+
+    assessed_scores = [
+        score for score in current_scores.values()
+        if score is not None
+    ]
+
+    if assessed_scores:
+
+        current = round(
+            sum(assessed_scores) / len(assessed_scores)
         )
 
-    current = round(
-        sum(current_scores.values()) / 3
-    )
+        st.metric(
+            "Current Average (Assessed Skills)",
+            f"{current}%"
+        )
 
-    st.metric(
-        "Current Technical Readiness",
-        f"{current}%"
-    )
+    else:
+
+        current = 0
+
+        st.metric(
+            "Current Average",
+            "Not Tested"
+        )
+
+        st.info(
+            "Complete an assessment to get your actual current score."
+        )
+
+    st.divider()
+
+    st.subheader("Set Your Target Scores")
 
     targets = {}
 
     for skill in ["Python", "Java", "SQL"]:
 
+        default_value = (
+            current_scores[skill]
+            if current_scores[skill] is not None
+            else 0
+        )
+
+        if current_scores[skill] is None:
+
+            st.caption(
+                f"{skill}: Not Tested yet. Set a target for simulation."
+            )
+
         targets[skill] = st.slider(
             f"{skill} Target",
             0,
             100,
-            current_scores[skill]
+            default_value
         )
 
     predicted = round(
@@ -1495,23 +1678,36 @@ elif page == "What-If Simulator":
         f"{predicted}%"
     )
 
-    difference = predicted - current
+    if assessed_scores:
 
-    if difference > 0:
+        difference = predicted - current
 
-        st.success(
-            f"Readiness improves by {difference}% in this simulation."
-        )
+        if difference > 0:
 
-    elif difference < 0:
+            st.success(
+                f"Readiness improves by {difference}% in this simulation."
+            )
 
-        st.warning(
-            f"Readiness decreases by {abs(difference)}% in this simulation."
-        )
+        elif difference < 0:
+
+            st.warning(
+                f"Readiness decreases by {abs(difference)}% in this simulation."
+            )
+
+        else:
+
+            st.info("Readiness remains the same.")
 
     else:
 
-        st.info("Readiness remains the same.")
+        st.info(
+            "This is only a target simulation. "
+            "It does not represent your actual assessment performance."
+        )
+
+    st.caption(
+        "Simulation does not change actual assessment records."
+    )
 
 
 # =====================================================
@@ -1773,14 +1969,21 @@ elif page == "PDF Report Download":
     )
 
     if st.button("🔄 Generate PDF Report"):
+
         try:
+
             pdf_data = create_pdf_report()
+
             st.session_state["skillpath_pdf_report"] = pdf_data
+
             st.success("Your PDF report is ready!")
+
         except Exception as error:
+
             st.error(f"Unable to generate PDF report: {error}")
 
     if "skillpath_pdf_report" in st.session_state:
+
         st.download_button(
             label="⬇️ Download SkillPath AI Report (PDF)",
             data=st.session_state["skillpath_pdf_report"],
